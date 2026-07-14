@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 import hashlib
+import io
 
 # 1. Page Configuration
 st.set_page_config(
@@ -58,7 +59,71 @@ def verify_dentist_password(password):
     DENTIST_PASSWORD_HASH = hashlib.sha256("DentistSecure123!".encode()).hexdigest()
     return hashlib.sha256(password.encode()).hexdigest() == DENTIST_PASSWORD_HASH
 
-# 4. App Title and Navigation
+# 4. Process uploaded Excel file
+def process_excel_file(uploaded_file):
+    """Process the uploaded Excel file and add new patients to the database"""
+    try:
+        df_excel = pd.read_excel(uploaded_file)
+        
+        # Validate required column
+        if "Child Name" not in df_excel.columns:
+            st.error("❌ Excel file must contain a 'Child Name' column.")
+            return None
+        
+        # Create new records for each child in the Excel file
+        new_records = []
+        existing_children = st.session_state.dental_data["Child Name"].unique().tolist()
+        
+        added_count = 0
+        skipped_count = 0
+        
+        for idx, row in df_excel.iterrows():
+            child_name = row.get("Child Name", "").strip()
+            parent_contact = row.get("Parent Contact", "Not provided")
+            
+            if not child_name:
+                skipped_count += 1
+                continue
+            
+            # Check if child already exists
+            if child_name in existing_children:
+                skipped_count += 1
+                continue
+            
+            new_record = {
+                "Child Name": child_name,
+                "Parent Contact": parent_contact,
+                "Condition Status": "Pending",
+                "Last Brushed Check": "Not assessed",
+                "Needs Dentist Visit": "Pending",
+                "Notes": "Imported from Excel file",
+                "Last Updated": datetime.today().strftime('%Y-%m-%d'),
+                "Dentist Report": "Awaiting dentist review",
+                "Dentist Name": "Not yet assigned",
+                "Visit Date": "N/A"
+            }
+            
+            new_records.append(new_record)
+            added_count += 1
+        
+        if new_records:
+            new_df = pd.DataFrame(new_records)
+            st.session_state.dental_data = pd.concat(
+                [st.session_state.dental_data, new_df], 
+                ignore_index=True
+            )
+        
+        return {
+            "added": added_count,
+            "skipped": skipped_count,
+            "total": len(df_excel)
+        }
+    
+    except Exception as e:
+        st.error(f"❌ Error processing file: {str(e)}")
+        return None
+
+# 5. App Title and Navigation
 st.title("🦷 Children's Dental Health Dashboard")
 
 # Create tabs for Dentist and Parent access
@@ -99,6 +164,49 @@ with tab_dentist:
     
     # Display dentist features only if authenticated
     if st.session_state.get('dentist_authenticated', False):
+        st.write("---")
+        
+        # ========== EXCEL FILE UPLOAD SECTION ==========
+        st.subheader("📤 Import Patient List from Excel")
+        st.markdown("Upload an Excel file with patient names to add them to the system.")
+        
+        upload_container = st.container(border=True)
+        with upload_container:
+            col_upload1, col_upload2 = st.columns([3, 1])
+            
+            with col_upload1:
+                uploaded_file = st.file_uploader(
+                    "Choose an Excel file (.xlsx or .xls)",
+                    type=["xlsx", "xls"],
+                    key="excel_upload"
+                )
+            
+            with col_upload2:
+                if uploaded_file is not None:
+                    if st.button("📥 Process File", key="process_btn"):
+                        result = process_excel_file(uploaded_file)
+                        if result:
+                            st.success(
+                                f"✅ File processed successfully!\n\n"
+                                f"• Added: {result['added']} new patients\n"
+                                f"• Skipped: {result['skipped']} (already exist or invalid)\n"
+                                f"• Total rows: {result['total']}"
+                            )
+                            st.rerun()
+            
+            # Show template info
+            st.info(
+                "📋 **Excel File Format:**\n\n"
+                "Your Excel file should have the following columns:\n"
+                "- **Child Name** (required): Full name of the student\n"
+                "- **Parent Contact** (optional): Parent email or phone\n\n"
+                "Example:\n"
+                "| Child Name | Parent Contact |\n"
+                "|---|---|\n"
+                "| Sophia Martinez | sophia.m@example.com |\n"
+                "| James Wilson | james.w@example.com |"
+            )
+        
         st.write("---")
         
         # Two columns: Form on left, Dashboard on right
@@ -167,7 +275,7 @@ with tab_dentist:
                         st.session_state.dental_data = df
                         st.success(f"✅ Dental report updated for {child_name}!")
                     else:
-                        st.warning(f"⚠️ No record found for '{child_name}'. Please create a parent record first or contact administration.")
+                        st.warning(f"⚠️ No record found for '{child_name}'. Please import the patient first or contact administration.")
         
         # ========== DENTIST DASHBOARD ==========
         with col_dentist_dashboard:
@@ -207,7 +315,8 @@ with tab_dentist:
                         color_discrete_map={
                             "Healthy": "#2ECC71",
                             "Requires Attention": "#F1C40F",
-                            "Urgent Care Needed": "#E74C3C"
+                            "Urgent Care Needed": "#E74C3C",
+                            "Pending": "#95A5A6"
                         },
                         hole=0.4
                     )
@@ -225,7 +334,7 @@ with tab_dentist:
                         x="Brushing Behavior",
                         y="Count",
                         color="Brushing Behavior",
-                        category_orders={"Brushing Behavior": ["Poor", "Needs Improvement", "Good", "Excellent"]}
+                        category_orders={"Brushing Behavior": ["Poor", "Needs Improvement", "Good", "Excellent", "Not assessed"]}
                     )
                     fig_brushing.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
                     st.plotly_chart(fig_brushing, use_container_width=True)
@@ -256,115 +365,60 @@ with tab_dentist:
         st.info("🔒 Please authenticate with your dentist credentials to access this portal.")
 
 # ==========================================
-# PARENT PORTAL (PUBLIC ACCESS)
+# PARENT PORTAL (READ-ONLY ACCESS)
 # ==========================================
 with tab_parent:
     st.header("👨‍👩‍👧 Parent Portal")
     st.markdown("Welcome parents! Enter your child's name to view their dental health records.")
     st.write("---")
     
-    col_parent_form, col_parent_display = st.columns([1, 2], gap="large")
+    # ========== PARENT VIEW (READ-ONLY) ==========
+    st.subheader("👶 Your Child's Dental Records")
     
-    # ========== PARENT FORM ==========
-    with col_parent_form:
-        st.subheader("📋 Parent Update Portal")
-        st.markdown("*Submit or update your child's dental status*")
-        
-        with st.form(key="parent_submission_form", clear_on_submit=True):
-            child_name = st.text_input("Student's Full Name*", placeholder="e.g., Sophia Martinez")
-            parent_email = st.text_input("Parent Contact Email*", placeholder="name@example.com")
-            
-            condition = st.selectbox(
-                "Overall Mouth/Tooth Condition*",
-                options=["Healthy", "Requires Attention", "Urgent Care Needed"]
-            )
-            
-            brushing = st.select_slider(
-                "Recent Routine Brushing Behavior",
-                options=["Poor", "Needs Improvement", "Good", "Excellent"],
-                value="Good"
-            )
-            
-            dentist_needed = st.radio("Does your child need a dentist visit?", options=["No", "Yes"])
-            
-            notes = st.text_area(
-                "Additional Observations/Notes",
-                placeholder="Describe any pain, discoloration, or loose teeth..."
-            )
-            
-            submit_button = st.form_submit_button(label="🚀 Update Child Status")
-        
-        if submit_button:
-            if not child_name or not parent_email:
-                st.error("Please fill out both the Student Name and Parent Contact fields.")
-            else:
-                new_report = {
-                    "Child Name": child_name.strip(),
-                    "Parent Contact": parent_email.strip(),
-                    "Condition Status": condition,
-                    "Last Brushed Check": brushing,
-                    "Needs Dentist Visit": dentist_needed,
-                    "Notes": notes.strip() if notes else "None",
-                    "Last Updated": datetime.today().strftime('%Y-%m-%d'),
-                    "Dentist Report": "Pending dentist review",
-                    "Dentist Name": "Not yet assigned",
-                    "Visit Date": "N/A"
-                }
-                
-                df = st.session_state.dental_data
-                df = df[df["Child Name"].str.lower() != child_name.strip().lower()]
-                df = pd.concat([df, pd.DataFrame([new_report])], ignore_index=True)
-                
-                st.session_state.dental_data = df
-                st.success(f"Success! Record for {child_name} submitted/updated.")
+    # Search for child's record
+    search_name = st.text_input("Enter your child's name to view records:", "", key="parent_search")
     
-    # ========== PARENT VIEW ==========
-    with col_parent_display:
-        st.subheader("👶 Your Child's Dental Records")
+    if search_name:
+        current_df = st.session_state.dental_data
+        matching_records = current_df[current_df["Child Name"].str.contains(search_name, case=False, na=False)]
         
-        # Search for child's record
-        search_name = st.text_input("Enter your child's name to view records:", "", key="parent_search")
-        
-        if search_name:
-            current_df = st.session_state.dental_data
-            matching_records = current_df[current_df["Child Name"].str.contains(search_name, case=False, na=False)]
-            
-            if not matching_records.empty:
-                for idx, record in matching_records.iterrows():
-                    st.write("---")
-                    st.subheader(f"📄 {record['Child Name']}'s Record")
-                    
-                    # Display parent-friendly information
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write(f"**Overall Condition:** {record['Condition Status']}")
-                        if record['Condition Status'] == "Healthy":
-                            st.success("✅ Keep up the good work!")
-                        elif record['Condition Status'] == "Requires Attention":
-                            st.warning("⚠️ Please schedule a dental visit soon")
-                        else:
-                            st.error("🚨 Urgent attention needed - Contact dentist immediately!")
-                    
-                    with col2:
-                        st.write(f"**Brushing Habits:** {record['Last Brushed Check']}")
-                        st.write(f"**Dentist Visit Needed:** {record['Needs Dentist Visit']}")
-                    
-                    st.write("---")
-                    
-                    st.write(f"**Parent Notes:** {record['Notes']}")
-                    st.write(f"**Last Updated:** {record['Last Updated']}")
-                    
-                    # Dentist's Report (if available)
-                    if record['Dentist Report'] != "Pending dentist review":
-                        st.info("📋 **Latest Dentist Report:**")
-                        st.write(f"{record['Dentist Report']}")
-                        st.write(f"*By {record['Dentist Name']} on {record['Visit Date']}*")
+        if not matching_records.empty:
+            for idx, record in matching_records.iterrows():
+                st.write("---")
+                st.subheader(f"📄 {record['Child Name']}'s Record")
+                
+                # Display parent-friendly information
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write(f"**Overall Condition:** {record['Condition Status']}")
+                    if record['Condition Status'] == "Healthy":
+                        st.success("✅ Keep up the good work!")
+                    elif record['Condition Status'] == "Requires Attention":
+                        st.warning("⚠️ Please schedule a dental visit soon")
+                    elif record['Condition Status'] == "Urgent Care Needed":
+                        st.error("🚨 Urgent attention needed - Contact dentist immediately!")
                     else:
-                        st.info("ℹ️ Awaiting dentist's review and report.")
-            
-            else:
-                st.warning(f"❌ No records found for '{search_name}'. Please submit an entry first.")
+                        st.info("ℹ️ Assessment pending - your dentist will review soon")
+                
+                with col2:
+                    st.write(f"**Brushing Habits:** {record['Last Brushed Check']}")
+                    st.write(f"**Dentist Visit Needed:** {record['Needs Dentist Visit']}")
+                
+                st.write("---")
+                
+                st.write(f"**Last Updated:** {record['Last Updated']}")
+                
+                # Dentist's Report (if available)
+                if record['Dentist Report'] not in ["Pending dentist review", "Awaiting dentist review"]:
+                    st.info("📋 **Latest Dentist Report:**")
+                    st.write(f"{record['Dentist Report']}")
+                    st.write(f"*By {record['Dentist Name']} on {record['Visit Date']}*")
+                else:
+                    st.info("ℹ️ Awaiting dentist's review and report.")
         
         else:
-            st.info("🔍 Enter your child's name above to view their dental records.")
+            st.warning(f"❌ No records found for '{search_name}'. Please contact your dentist's office for more information.")
+    
+    else:
+        st.info("🔍 Enter your child's name above to view their dental records.")
